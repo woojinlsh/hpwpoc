@@ -4,7 +4,6 @@ import io
 import logging
 from PIL import Image
 from google import genai
-from google.genai import types
 import requests
 
 # 로깅 설정
@@ -13,11 +12,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # 환경변수 로드
 VERKADA_API_KEY = os.getenv("VERKADA_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# 감시할 카메라 ID 목록 (쉼표로 구분: "cam_1,cam_2")
 CAMERA_IDS = [cid.strip() for cid in os.getenv("CAMERA_IDS", "").split(",") if cid.strip()]
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))  # 주기 (초 단위, 기본 60초)
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 
-# Gemini 클라이언트 초기화
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 class VerkadaClient:
@@ -28,7 +25,6 @@ class VerkadaClient:
         
     def get_token(self):
         """Verkada API Token 발급 및 갱신"""
-        # 토큰이 유효하면 기존 토큰 재사용 (유효기간 여유 5분)
         if self.token and time.time() < self.token_expiry - 300:
             return self.token
 
@@ -44,7 +40,6 @@ class VerkadaClient:
             data = response.json()
             
             self.token = data.get("token")
-            # 보통 토큰 유효기간은 30분~24시간 사이. 기본적으로 30분 유효로 계산
             self.token_expiry = time.time() + 1800 
             logging.info("Verkada API 토큰 발급 성공")
             return self.token
@@ -53,21 +48,43 @@ class VerkadaClient:
             return None
 
     def get_latest_thumbnail(self, camera_id):
-        """카메라 최신 썸네일 이미지 다운로드 (Bytes)"""
+        """카메라 최신 썸네일 이미지 다운로드 (S3 리다이렉트 403 우회 로직 적용)"""
         token = self.get_token()
         if not token:
             return None
 
         url = f"https://api.verkada.com/cameras/v1/devices/thumbnail/latest?camera_id={camera_id}"
         headers = {
-            "accept": "image/jpeg",
             "x-verkada-auth": token
         }
 
         try:
-            response = requests.get(url, headers=headers)
+            # allow_redirects=False로 설정하여 S3로 자동 이동할 때 인증 헤더가 유출되는 것 방지
+            response = requests.get(url, headers=headers, allow_redirects=False)
+
+            # Case 1: 301/302 Redirect 응답인 경우 (AWS S3 Pre-signed URL)
+            if response.status_code in [301, 302, 303, 307, 308]:
+                s3_url = response.headers.get("Location")
+                if s3_url:
+                    # S3 요청 시에는 Verkada 인증 헤더(x-verkada-auth)를 제거하고 순수 GET 요청
+                    img_res = requests.get(s3_url)
+                    img_res.raise_for_status()
+                    return img_res.content
+
+            # Case 2: JSON 타입으로 다운로드 URL을 반환하는 경우
+            content_type = response.headers.get("Content-Type", "")
+            if "application/json" in content_type:
+                data = response.json()
+                img_url = data.get("url") or data.get("thumbnail_url")
+                if img_url:
+                    img_res = requests.get(img_url)
+                    img_res.raise_for_status()
+                    return img_res.content
+
+            # Case 3: 바로 바이너리 이미지가 반환되는 경우
             response.raise_for_status()
-            return response.content  # 바이너리 이미지 데이터 반환
+            return response.content
+
         except Exception as e:
             logging.error(f"카메라({camera_id}) 썸네일 수집 실패: {e}")
             return None
@@ -85,13 +102,12 @@ class VerkadaClient:
             "x-verkada-auth": token
         }
         
-        # Helix 이벤트 페이로드 작성
         payload = {
             "camera_id": camera_id,
             "event_type": "tower_light_status",
-            "event_time": int(time.time() * 1000),  # Epoch milliseconds
+            "event_time": int(time.time() * 1000),
             "attributes": {
-                "light_color": light_color, # RED, YELLOW, GREEN, OFF 등
+                "light_color": light_color,
                 "status": "NORMAL" if light_color == "GREEN" else "WARNING/STOP"
             }
         }
@@ -126,7 +142,6 @@ def analyze_tower_light_with_gemini(image_bytes):
         )
         
         result = response.text.strip().upper()
-        # 정해진 단어 외의 응답 예외 처리
         if result not in ["RED", "YELLOW", "GREEN", "OFF"]:
             logging.warning(f"Gemini 응답 미인식: {result}, 기본값 OFF 처리")
             return "OFF"
@@ -139,27 +154,22 @@ def analyze_tower_light_with_gemini(image_bytes):
 
 def main():
     verkada = VerkadaClient(api_key=VERKADA_API_KEY)
-    
     logging.info("경광등 감시 모니터링 시스템을 시작합니다.")
     
     while True:
         for camera_id in CAMERA_IDS:
             logging.info(f"카메라({camera_id}) 상태 점검 중...")
             
-            # 1. 썸네일 수집
             img_bytes = verkada.get_latest_thumbnail(camera_id)
             if not img_bytes:
                 continue
             
-            # 2. Gemini 이미지 분석
             color_status = analyze_tower_light_with_gemini(img_bytes)
             logging.info(f"카메라({camera_id}) 감지 결과: {color_status}")
             
-            # 3. Verkada Helix에 데이터 보냄
             if color_status != "UNKNOWN":
                 verkada.send_helix_event(camera_id, color_status)
                 
-        # 주기적 대기
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
