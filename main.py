@@ -1,13 +1,15 @@
 import os
 import time
 import io
+import json
+import re
 import logging
 import sys
 from PIL import Image
 from google import genai
 import requests
 
-# 로깅 설정 (Coolify 실시간 로그 출력용 sys.stdout 지정)
+# 로깅 설정 (Coolify 실시간 로그 출력용)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -20,7 +22,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CAMERA_IDS = [cid.strip() for cid in os.getenv("CAMERA_IDS", "").split(",") if cid.strip()]
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 
-# prompt.txt 절대 경로 설정 (main.py 위치 기준)
+# Verkada Video Tagging API용 환경변수 (기본값 설정)
+VERKADA_ORG_ID = os.getenv("VERKADA_ORG_ID", "8c115ce0-a020-444b-ae3f-0b9d2352a592")
+EVENT_TYPE_UID = os.getenv("EVENT_TYPE_UID", "3aebb77e-32ff-4ffd-bf21-5bc4c3c761fc")
+
+# prompt.txt 절대 경로 설정
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_FILE_PATH = os.getenv("PROMPT_FILE_PATH", os.path.join(BASE_DIR, "prompt.txt"))
 
@@ -40,16 +46,10 @@ def load_gemini_prompt():
     except Exception as e:
         logging.error(f"프롬프트 파일 읽기 오류: {e}")
 
-    # 파일 읽기 실패 시 사용할 백업 프롬프트
+    # 백업 프롬프트
     return """
-    이 이미지에 있는 장비의 경광등(Tower Light/Signal Tower) 색상을 분석해줘.
-    다음 목록 중 가장 알맞은 상태 하나만 반드시 대문자로 출력해:
-    - RED (빨간색 점등)
-    - YELLOW (노란색/주황색 점등)
-    - GREEN (초록색 점등)
-    - OFF (꺼짐 또는 경광등을 찾을 수 없음)
-
-    응답은 다른 설명 없이 오직 위의 단어 중 하나만 반환해 (예: GREEN).
+    이 이미지에서 R1, R2, R3, R4 위치의 경광등 색상을 분석해줘.
+    반드시 [ {"label": "R1", "color": "GREEN"}, ... ] 형태의 JSON 리스트로만 응답해.
     """
 
 
@@ -101,13 +101,11 @@ class VerkadaClient:
         try:
             logging.info(f"Verkada 썸네일 API 호출 중... (Camera ID: {camera_id})")
             response = requests.get(url, headers=headers, allow_redirects=False, timeout=15)
-            logging.info(f"Verkada API 응답 상태 코드: {response.status_code}")
 
             # 1. S3/CDN Pre-signed URL로 Redirect 되는 경우
             if response.status_code in [301, 302, 303, 307, 308]:
                 s3_url = response.headers.get("Location")
                 if s3_url:
-                    logging.info("Redirect 감지! S3 보안 URL에서 이미지 다운로드를 진행합니다.")
                     img_res = requests.get(s3_url, timeout=15)
                     if img_res.status_code == 200:
                         return img_res.content
@@ -141,13 +139,13 @@ class VerkadaClient:
             logging.error(f"카메라({camera_id}) 썸네일 수집 중 예외 발생: {e}", exc_info=True)
             return None
 
-    def send_helix_event(self, camera_id, light_color):
-        """Verkada Helix로 판별된 경광등 상태 이벤트 전송"""
+    def send_video_tagging_event(self, camera_id, attributes_dict):
+        """Verkada Video Tagging API로 경광등 상태 이벤트 전송"""
         token = self.get_token()
         if not token:
             return
 
-        url = "https://api.verkada.com/helix/v1/events"
+        url = f"https://api.verkada.com/cameras/v1/video_tagging/event?org_id={VERKADA_ORG_ID}"
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
@@ -155,48 +153,55 @@ class VerkadaClient:
         }
 
         payload = {
+            "attributes": attributes_dict,
+            "event_type_uid": EVENT_TYPE_UID,
             "camera_id": camera_id,
-            "event_type": "tower_light_status",
-            "event_time": int(time.time() * 1000),
-            "attributes": {
-                "light_color": light_color,
-                "status": "NORMAL" if light_color == "GREEN" else "WARNING/STOP"
-            }
+            "time_ms": int(time.time() * 1000)
         }
 
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=10)
             if res.status_code in [200, 201]:
-                logging.info(f"Helix 이벤트 전송 성공 - 카메라: {camera_id}, 상태: {light_color}")
+                logging.info(f"Video Tagging 이벤트 전송 성공 - 카메라: {camera_id}, attributes: {attributes_dict}")
             else:
-                logging.error(f"Helix 이벤트 전송 실패 [HTTP {res.status_code}]: {res.text}")
+                logging.error(f"Video Tagging 이벤트 전송 실패 [HTTP {res.status_code}]: {res.text}")
         except Exception as e:
-            logging.error(f"Helix 이벤트 전송 중 예외 발생 ({camera_id}): {e}")
+            logging.error(f"Video Tagging 이벤트 전송 중 예외 발생 ({camera_id}): {e}")
 
 
 def analyze_tower_light_with_gemini(image_bytes):
-    """Gemini Vision API를 사용해 경광등 색상 판별"""
+    """Gemini Vision API를 사용해 경광등 색상 분석 후 dict 구조로 변환"""
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        
-        # 외부 prompt.txt 파일에서 프롬프트 불러오기
         prompt = load_gemini_prompt()
 
-        # gemini-3-flash-preview 모델 사용
         response = ai_client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=[image, prompt]
         )
 
-        result = response.text.strip().upper()
-        if result not in ["RED", "YELLOW", "GREEN", "OFF"]:
-            logging.warning(f"Gemini 응답 미인식({result}), 기본값 OFF 처리")
-            return "OFF"
+        raw_text = response.text.strip()
+        
+        # Gemini가 ```json ... ``` 과 같이 마크다운으로 응답할 경우를 대비해 순수 JSON만 정제
+        cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
+        
+        # JSON 파싱
+        items = json.loads(cleaned_text)
+        
+        # [{'label': 'R1', 'color': 'GREEN'}, ...] -> {'R1': 'GREEN', ...} 형태로 변환
+        attributes_dict = {}
+        if isinstance(items, list):
+            for item in items:
+                label = item.get("label")
+                color = item.get("color", "OFF").upper()
+                if label:
+                    attributes_dict[label] = color
+                    
+        return attributes_dict
 
-        return result
     except Exception as e:
-        logging.error(f"Gemini 분석 중 에러 발생: {e}")
-        return "UNKNOWN"
+        logging.error(f"Gemini 분석 또는 JSON 파싱 중 에러 발생: {e}")
+        return None
 
 
 def main():
@@ -212,16 +217,19 @@ def main():
             for camera_id in CAMERA_IDS:
                 logging.info(f"카메라({camera_id}) 상태 점검 중...")
 
+                # 1. 썸네일 수집
                 img_bytes = verkada.get_latest_thumbnail(camera_id)
                 if not img_bytes:
                     logging.warning(f"카메라({camera_id}) 이미지를 가져오지 못해 스킵합니다.")
                     continue
 
-                color_status = analyze_tower_light_with_gemini(img_bytes)
-                logging.info(f"카메라({camera_id}) 분석 결과: {color_status}")
+                # 2. Gemini 분석 (JSON -> Dictionary 변환)
+                attributes_dict = analyze_tower_light_with_gemini(img_bytes)
+                logging.info(f"카메라({camera_id}) 분석 결과: {attributes_dict}")
 
-                if color_status != "UNKNOWN":
-                    verkada.send_helix_event(camera_id, color_status)
+                # 3. Verkada Video Tagging API 전송
+                if attributes_dict:
+                    verkada.send_video_tagging_event(camera_id, attributes_dict)
 
         except Exception as e:
             logging.error(f"메인 루프 실행 중 에러 발생: {e}", exc_info=True)
