@@ -140,7 +140,7 @@ class VerkadaClient:
             return None
 
     def send_video_tagging_event(self, camera_id, attributes_dict):
-        """Verkada Video Tagging API로 경광등 상태 이벤트 전송 (상세 디버깅 모드)"""
+        """Verkada Video Tagging API로 경광등 상태 이벤트 전송"""
         token = self.get_token()
         if not token:
             logging.error("토큰이 없어 Helix 이벤트 전송을 스킵합니다.")
@@ -160,14 +160,13 @@ class VerkadaClient:
             "time_ms": int(time.time() * 1000)
         }
 
-        # 1. 전송 데이터 로그 출력
+        # 전송 데이터 및 응답 디버깅 로그
         logging.info(f"[DEBUG] Helix 요청 URL: {url}")
         logging.info(f"[DEBUG] Helix 전송 Payload:\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
 
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=10)
 
-            # 2. Verkada 서버 원본 응답 로그 출력
             logging.info(f"[DEBUG] Helix 응답 상태 코드: {res.status_code}")
             logging.info(f"[DEBUG] Helix 응답 본문(Body): {res.text}")
 
@@ -197,8 +196,6 @@ def analyze_tower_light_with_gemini(image_bytes):
         cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
         items = json.loads(cleaned_text)
 
-        # [{'label': 'R1', 'color': 'GREEN'}, ...] -> {'R1': 'GREEN', ...}
-        # 라벨(R1, R2...)과 색상(GREEN...)을 모두 대문자(.upper())로 변환
         attributes_dict = {}
         if isinstance(items, list):
             for item in items:
@@ -237,8 +234,14 @@ def main():
                 attributes_dict = analyze_tower_light_with_gemini(img_bytes)
                 logging.info(f"카메라({camera_id}) 분석 결과: {attributes_dict}")
 
-                # 3. Verkada Video Tagging API 전송
+                # 3. STATUS 판별 로직 적용
                 if attributes_dict:
+                    required_keys = ["R1", "R2", "R3", "R4"]
+                    # R1~R4가 모두 존재하고 모해서 GREEN인 경우 NORMAL, 하나라도 아니면 ABNORMAL
+                    is_all_green = all(attributes_dict.get(k) == "GREEN" for k in required_keys)
+                    attributes_dict["STATUS"] = "NORMAL" if is_all_green else "ABNORMAL"
+
+                    # 4. Verkada Video Tagging API 전송
                     verkada.send_video_tagging_event(camera_id, attributes_dict)
 
         except Exception as e:
