@@ -9,7 +9,7 @@ from PIL import Image
 from google import genai
 import requests
 
-# 로깅 설정 (Coolify 실시간 로그 출력용)
+# 로깅 설정 (Coolify 실시간 로그 출력용 sys.stdout 지정)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -22,11 +22,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CAMERA_IDS = [cid.strip() for cid in os.getenv("CAMERA_IDS", "").split(",") if cid.strip()]
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 
-# Verkada Video Tagging API용 환경변수 (기본값 설정)
+# Verkada Video Tagging API 환경변수
 VERKADA_ORG_ID = os.getenv("VERKADA_ORG_ID", "8c115ce0-a020-444b-ae3f-0b9d2352a592")
 EVENT_TYPE_UID = os.getenv("EVENT_TYPE_UID", "3aebb77e-32ff-4ffd-bf21-5bc4c3c761fc")
 
-# prompt.txt 절대 경로 설정
+# prompt.txt 절대 경로 설정 (main.py 위치 기준)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_FILE_PATH = os.getenv("PROMPT_FILE_PATH", os.path.join(BASE_DIR, "prompt.txt"))
 
@@ -140,9 +140,10 @@ class VerkadaClient:
             return None
 
     def send_video_tagging_event(self, camera_id, attributes_dict):
-        """Verkada Video Tagging API로 경광등 상태 이벤트 전송"""
+        """Verkada Video Tagging API로 경광등 상태 이벤트 전송 (상세 디버깅 모드)"""
         token = self.get_token()
         if not token:
+            logging.error("토큰이 없어 Helix 이벤트 전송을 스킵합니다.")
             return
 
         url = f"https://api.verkada.com/cameras/v1/video_tagging/event?org_id={VERKADA_ORG_ID}"
@@ -159,14 +160,24 @@ class VerkadaClient:
             "time_ms": int(time.time() * 1000)
         }
 
+        # 1. 전송 데이터 로그 출력
+        logging.info(f"[DEBUG] Helix 요청 URL: {url}")
+        logging.info(f"[DEBUG] Helix 전송 Payload:\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
+
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=10)
+
+            # 2. Verkada 서버 원본 응답 로그 출력
+            logging.info(f"[DEBUG] Helix 응답 상태 코드: {res.status_code}")
+            logging.info(f"[DEBUG] Helix 응답 본문(Body): {res.text}")
+
             if res.status_code in [200, 201]:
-                logging.info(f"Video Tagging 이벤트 전송 성공 - 카메라: {camera_id}, attributes: {attributes_dict}")
+                logging.info(f"Helix 이벤트 전송 성공 - 카메라: {camera_id}")
             else:
-                logging.error(f"Video Tagging 이벤트 전송 실패 [HTTP {res.status_code}]: {res.text}")
+                logging.error(f"Helix 이벤트 전송 실패 [HTTP {res.status_code}]: {res.text}")
+
         except Exception as e:
-            logging.error(f"Video Tagging 이벤트 전송 중 예외 발생 ({camera_id}): {e}")
+            logging.error(f"Helix 이벤트 전송 중 예외 발생 ({camera_id}): {e}", exc_info=True)
 
 
 def analyze_tower_light_with_gemini(image_bytes):
@@ -181,22 +192,21 @@ def analyze_tower_light_with_gemini(image_bytes):
         )
 
         raw_text = response.text.strip()
-        
-        # Gemini가 ```json ... ``` 과 같이 마크다운으로 응답할 경우를 대비해 순수 JSON만 정제
+
+        # Gemini 마크다운 블록 제거 및 JSON 추출
         cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
-        
-        # JSON 파싱
         items = json.loads(cleaned_text)
-        
-        # [{'label': 'R1', 'color': 'GREEN'}, ...] -> {'R1': 'GREEN', ...} 형태로 변환
+
+        # [{'label': 'R1', 'color': 'GREEN'}, ...] -> {'R1': 'GREEN', ...}
+        # 라벨(R1, R2...)과 색상(GREEN...)을 모두 대문자(.upper())로 변환
         attributes_dict = {}
         if isinstance(items, list):
             for item in items:
-                label = item.get("label")
-                color = item.get("color", "OFF").upper()
+                label = str(item.get("label", "")).strip().upper()
+                color = str(item.get("color", "OFF")).strip().upper()
                 if label:
                     attributes_dict[label] = color
-                    
+
         return attributes_dict
 
     except Exception as e:
@@ -223,7 +233,7 @@ def main():
                     logging.warning(f"카메라({camera_id}) 이미지를 가져오지 못해 스킵합니다.")
                     continue
 
-                # 2. Gemini 분석 (JSON -> Dictionary 변환)
+                # 2. Gemini 분석 (JSON -> Dictionary)
                 attributes_dict = analyze_tower_light_with_gemini(img_bytes)
                 logging.info(f"카메라({camera_id}) 분석 결과: {attributes_dict}")
 
