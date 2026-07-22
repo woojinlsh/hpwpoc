@@ -182,8 +182,9 @@ def analyze_tower_light_with_gemini(image_bytes):
         # 외부 prompt.txt 파일에서 프롬프트 불러오기
         prompt = load_gemini_prompt()
 
+        # gemini-3-flash-preview 모델 사용
         response = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3-flash-preview",
             contents=[image, prompt]
         )
 
