@@ -7,7 +7,7 @@ from PIL import Image
 from google import genai
 import requests
 
-# 로깅 설정
+# 로깅 설정 (Coolify 실시간 로그 출력용 sys.stdout 지정)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -19,7 +19,10 @@ VERKADA_API_KEY = os.getenv("VERKADA_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CAMERA_IDS = [cid.strip() for cid in os.getenv("CAMERA_IDS", "").split(",") if cid.strip()]
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
-PROMPT_FILE_PATH = os.getenv("PROMPT_FILE_PATH", "prompt.txt")
+
+# prompt.txt 절대 경로 설정 (main.py 위치 기준)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROMPT_FILE_PATH = os.getenv("PROMPT_FILE_PATH", os.path.join(BASE_DIR, "prompt.txt"))
 
 # Gemini 클라이언트 초기화
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
