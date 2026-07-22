@@ -46,10 +46,10 @@ def load_gemini_prompt():
     except Exception as e:
         logging.error(f"프롬프트 파일 읽기 오류: {e}")
 
-    # 백업 프롬프트
+    # 백업 프롬프트 (R1 ~ R5 대응)
     return """
-    이 이미지에서 R1, R2, R3, R4 위치의 경광등 색상을 분석해줘.
-    반드시 [ {"label": "R1", "color": "GREEN"}, ... ] 형태의 JSON 리스트로만 응답해.
+    이 이미지에서 R1, R2, R3, R4, R5 위치의 경광등 색상을 분석해줘.
+    반드시 [ {"label": "R1", "color": "GREEN"}, ... {"label": "R5", "color": "YELLOW"} ] 형태의 JSON 리스트로만 응답해.
     """
 
 
@@ -160,7 +160,7 @@ class VerkadaClient:
             "time_ms": int(time.time() * 1000)
         }
 
-        # 전송 데이터 및 응답 디버깅 로그
+        # 디버깅 로그
         logging.info(f"[DEBUG] Helix 요청 URL: {url}")
         logging.info(f"[DEBUG] Helix 전송 Payload:\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
 
@@ -192,7 +192,7 @@ def analyze_tower_light_with_gemini(image_bytes):
 
         raw_text = response.text.strip()
 
-        # Gemini 마크다운 블록 제거 및 JSON 추출
+        # Gemini 마크다운 블록 제거 및 JSON 파싱
         cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
         items = json.loads(cleaned_text)
 
@@ -234,10 +234,10 @@ def main():
                 attributes_dict = analyze_tower_light_with_gemini(img_bytes)
                 logging.info(f"카메라({camera_id}) 분석 결과: {attributes_dict}")
 
-                # 3. STATUS 판별 로직 적용
+                # 3. STATUS 판별 로직 적용 (R1 ~ R5)
                 if attributes_dict:
-                    required_keys = ["R1", "R2", "R3", "R4"]
-                    # R1~R4가 모두 존재하고 모해서 GREEN인 경우 NORMAL, 하나라도 아니면 ABNORMAL
+                    required_keys = ["R1", "R2", "R3", "R4", "R5"]
+                    # R1부터 R5까지 모두 존재하고 GREEN인 경우 NORMAL, 하나라도 없거나 GREEN이 아니면 ABNORMAL
                     is_all_green = all(attributes_dict.get(k) == "GREEN" for k in required_keys)
                     attributes_dict["STATUS"] = "NORMAL" if is_all_green else "ABNORMAL"
 
