@@ -1,4 +1,4 @@
-MODEL: gemini-3.5-flash-lite
+MODEL: gemini-3.5-flash
 
 이 이미지에서 R1, R2, R3, R4, R5 위치에 해당하는 각 경광등(Tower Light)의 색상을 분석해줘.
 
