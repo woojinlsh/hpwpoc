@@ -34,23 +34,48 @@ PROMPT_FILE_PATH = os.getenv("PROMPT_FILE_PATH", os.path.join(BASE_DIR, "prompt.
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-def load_gemini_prompt():
-    """prompt.txt 파일에서 프롬프트 텍스트를 읽어옵니다."""
-    try:
-        if os.path.exists(PROMPT_FILE_PATH):
-            with open(PROMPT_FILE_PATH, "r", encoding="utf-8") as f:
-                prompt_text = f.read().strip()
-                if prompt_text:
-                    return prompt_text
-        logging.warning(f"'{PROMPT_FILE_PATH}' 파일이 없거나 비어있어 기본 내장 프롬프트를 사용합니다.")
-    except Exception as e:
-        logging.error(f"프롬프트 파일 읽기 오류: {e}")
-
-    # 백업 프롬프트 (R1 ~ R5 대응)
-    return """
+def load_gemini_config():
+    """
+    prompt.txt 파일에서 모델명(MODEL: ...)과 프롬프트 텍스트를 함께 읽어옵니다.
+    반환값: (model_name, prompt_text)
+    """
+    default_model = "gemini-3.5-flash-lite"
+    default_prompt = """
     이 이미지에서 R1, R2, R3, R4, R5 위치의 경광등 색상을 분석해줘.
     반드시 [ {"label": "R1", "color": "GREEN"}, ... {"label": "R5", "color": "YELLOW"} ] 형태의 JSON 리스트로만 응답해.
     """
+
+    if not os.path.exists(PROMPT_FILE_PATH):
+        logging.warning(f"'{PROMPT_FILE_PATH}' 파일이 없어 기본 설정(모델: {default_model})을 사용합니다.")
+        return default_model, default_prompt
+
+    try:
+        with open(PROMPT_FILE_PATH, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+
+        if not content:
+            logging.warning(f"'{PROMPT_FILE_PATH}' 파일이 비어있어 기본 설정을 사용합니다.")
+            return default_model, default_prompt
+
+        lines = content.splitlines()
+        model_name = default_model
+        prompt_lines = []
+
+        # MODEL: 헤더 라인 파싱
+        for line in lines:
+            if line.strip().upper().startswith("MODEL:"):
+                extracted_model = line.split(":", 1)[1].strip()
+                if extracted_model:
+                    model_name = extracted_model
+            else:
+                prompt_lines.append(line)
+
+        prompt_text = "\n".join(prompt_lines).strip()
+        return model_name, prompt_text
+
+    except Exception as e:
+        logging.error(f"프롬프트 파일 읽기 오류: {e}")
+        return default_model, default_prompt
 
 
 class VerkadaClient:
@@ -183,10 +208,13 @@ def analyze_tower_light_with_gemini(image_bytes):
     """Gemini Vision API를 사용해 경광등 색상 분석 후 dict 구조로 변환"""
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        prompt = load_gemini_prompt()
+        
+        # prompt.txt에서 모델명과 프롬프트 텍스트 동시 로드
+        model_name, prompt = load_gemini_config()
+        logging.info(f"Gemini 호출 준비 (사용 모델: {model_name})")
 
         response = ai_client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model=model_name,
             contents=[image, prompt]
         )
 
@@ -237,7 +265,6 @@ def main():
                 # 3. STATUS 판별 로직 적용 (R1 ~ R5)
                 if attributes_dict:
                     required_keys = ["R1", "R2", "R3", "R4", "R5"]
-                    # R1부터 R5까지 모두 존재하고 GREEN인 경우 NORMAL, 하나라도 없거나 GREEN이 아니면 ABNORMAL
                     is_all_green = all(attributes_dict.get(k) == "GREEN" for k in required_keys)
                     attributes_dict["STATUS"] = "NORMAL" if is_all_green else "ABNORMAL"
 
