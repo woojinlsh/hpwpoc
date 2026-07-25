@@ -265,8 +265,17 @@ def main():
                 # 3. STATUS 판별 로직 적용 (R1 ~ R5)
                 if attributes_dict:
                     required_keys = ["R1", "R2", "R3", "R4", "R5"]
+                    
+                    # R1~R5가 모두 GREEN 인지 확인
                     is_all_green = all(attributes_dict.get(k) == "GREEN" for k in required_keys)
-                    attributes_dict["STATUS"] = "NORMAL" if is_all_green else "ABNORMAL"
+                    # R1~R5가 모두 OFF 인지 확인
+                    is_all_off = all(attributes_dict.get(k) == "OFF" for k in required_keys)
+
+                    # 모두 GREEN 이거나 모두 OFF 이면 NORMAL, 그 외에는 ABNORMAL
+                    if is_all_green or is_all_off:
+                        attributes_dict["STATUS"] = "NORMAL"
+                    else:
+                        attributes_dict["STATUS"] = "ABNORMAL"
 
                     # 4. Verkada Video Tagging API 전송
                     verkada.send_video_tagging_event(camera_id, attributes_dict)
